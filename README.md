@@ -56,7 +56,7 @@ func main() {
     }
 
     http.Handle("/", loggingServiceRouter)
-    http.ListenAndServe(":8080", nil)
+    _ = http.ListenAndServe(":8080", nil)
 }
 ```
 就这么几行, 就得到了一个带access log功能的HTTP JSON API服务器.
@@ -85,9 +85,9 @@ curl -G http://127.0.0.1:8080/user/test
   框架会把url pattern/json/query string解析成第二个参数struct, 并把第一个返回值给json encode之后放在response body里输出.
 
 2. `func(*ServiceMethodContext, *struct) error`
-  不处理返回值, 用户可以自己通过ServiceMethodContext.ResponseWriter输出任意body.
+  框架不处理返回值, 用户可以自己通过ServiceMethodContext.ResponseWriter输出任意body.
 
-如果返回了error,则按以下格式输出:
+如果返回了error或函数panic了, 则按以下格式输出:
 ```json
 {
   "code": 500,
@@ -108,21 +108,6 @@ func getSomething(_ *apihttpwrapper.ServiceMethodContext, _ *struct{}) (anything
     return anything, nil
 }
 ```
-
-### 看上去不错, 但那些struct的字段的有效性验证起来很麻烦.
-
-apihttpwrapper集成了[validator](https://godoc.org/gopkg.in/go-playground/validator.v9), 可以使用validator的struct tag语法为
-struct添加各种约束.
-
-例如:
-```
-type userInfo struct {
-    Age int        `validate:"max=140,min=0"`
-    Address string
-}
-```
-
-一旦输入的字段不符合约束, http框架即会返回HTTP的400错误.
 
 ### `apihttpwrapper.ServiceMethodContext`是干吗用的?
 

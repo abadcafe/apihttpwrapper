@@ -80,11 +80,11 @@ func (d *AccessLogDecorator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		panic(err)
 	}
 
-	row.SetRowField("beginTime", beginTime.Format("2006-01-02 15:04:05.999999999"))
+	row.SetRowField("begin", beginTime.Format("2006-01-02 15:04:05.999999999"))
 	row.SetRowField("status", strconv.Itoa(sw.status))
 	row.SetRowField("duration", strconv.FormatFloat(time.Now().Sub(beginTime).Seconds(), 'f', -1, 64))
 	row.SetRowField("remote", r.RemoteAddr)
-	row.SetRowField("httpMethod", r.Method)
+	row.SetRowField("method", r.Method)
 	row.SetRowField("uri", r.URL.RequestURI())
 	row.SetRowField("headers", string(marshaledHeaders))
 

@@ -7,7 +7,6 @@ import (
 	"github.com/gorilla/schema"
 	"github.com/julienschmidt/httprouter"
 	"golang.org/x/net/trace"
-	"gopkg.in/go-playground/validator.v9"
 	"io"
 	"net/http"
 	"net/url"
@@ -28,14 +27,13 @@ type ServiceMethodContext struct {
 	ResponseBodyWriter   io.Writer
 }
 
-type MethodCallLogger interface {
+type MethodLogger interface {
 	Record(field string, value string)
 }
 
 type ServiceHandler struct {
 	loggerContextKey   interface{}
 	method             *serviceMethod
-	validator          *validator.Validate
 	bypassRequestBody  bool
 }
 
@@ -131,7 +129,6 @@ func NewServiceHandler(method interface{}, loggerContextKey interface{},
 			value:   reflect.ValueOf(method),
 			argType: methodType.In(1),
 		},
-		validator:         validator.New(),
 		bypassRequestBody: bypassRequestBody,
 	}
 
@@ -212,13 +209,6 @@ func (h *ServiceHandler) parseArgument(r *http.Request, params httprouter.Params
 		}
 
 		err = formDecoder.Decode(arg, paramValues)
-		if err != nil {
-			return err
-		}
-	}
-
-	if reflect.ValueOf(arg).Elem().Kind() == reflect.Struct {
-		err = h.validator.Struct(arg)
 		if err != nil {
 			return err
 		}
@@ -308,7 +298,7 @@ func (h *ServiceHandler) ServeHTTPWithParams(rw http.ResponseWriter, r *http.Req
 		return
 	}
 
-	logger, ok := v.(MethodCallLogger)
+	logger, ok := v.(MethodLogger)
 	if !ok {
 		return
 	}
@@ -323,8 +313,8 @@ func (h *ServiceHandler) ServeHTTPWithParams(rw http.ResponseWriter, r *http.Req
 		panic(err)
 	}
 
-	logger.Record("methodCallArgument", string(marshaledArgs))
-	logger.Record("methodCallResponseData", string(marshaledData))
-	logger.Record("methodCallBeginTime", beginTime.Format("2006-01-02 15:04:05.999999999"))
-	logger.Record("methodCallDuration", strconv.FormatFloat(duration.Seconds(), 'f', -1, 64))
+	logger.Record("args", string(marshaledArgs))
+	logger.Record("resp", string(marshaledData))
+	logger.Record("methodBegin", beginTime.Format("2006-01-02 15:04:05.999999999"))
+	logger.Record("methodDuration", strconv.FormatFloat(duration.Seconds(), 'f', -1, 64))
 }

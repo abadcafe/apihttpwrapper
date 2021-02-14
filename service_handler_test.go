@@ -2,7 +2,7 @@ package apihttpwrapper
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"github.com/julienschmidt/httprouter"
 	"net/http/httptest"
 	"reflect"
@@ -10,199 +10,253 @@ import (
 	"testing"
 )
 
-type empty struct{}
+type dummyMethodLogger struct{}
 
-type validatorEnabled struct {
-	A int `validate:"required"`
-}
+var dummyLogger = &dummyMethodLogger{}
 
-type dummyMethodCallLogger struct{}
+func (l *dummyMethodLogger) Record(_ string, _ string) {}
 
-var e = empty{}
-var dummyLogger = &dummyMethodCallLogger{}
-
-func (l *dummyMethodCallLogger) Record(field string, value string) {}
-
-func (e *empty) errorMethod(*ServiceMethodContext, *empty) error {
-	return fmt.Errorf("expected error")
-}
-
-func (e *empty) errorMethodWithDelegatedResponseBody(*ServiceMethodContext, *empty) (*struct{ A int }, error) {
-	return &struct{ A int }{1}, fmt.Errorf("expected error")
-}
-
-func (e *empty) panicMethod(*ServiceMethodContext, *empty) (*struct{}, error) {
-	panic("expected panic")
-	return nil, nil
-}
-
-func normalFunc(*ServiceMethodContext, *struct{}) (*struct{ A int }, error) {
-	return &struct{ A int }{1}, nil
-}
-
-func nilFunc(*ServiceMethodContext, *struct{}) (*struct{ A int }, error) {
-	return nil, nil
-}
-
-func validatorEnabledFunc(*ServiceMethodContext, *validatorEnabled) (*struct{}, error) {
-	return nil, nil
-}
-
-func TestServiceHandlerCheckServiceMethodPrototype(t *testing.T) {
+func TestCheckServiceMethodPrototype(t *testing.T) {
 	t.Run("not function", func(t *testing.T) {
-		if err := checkServiceMethodPrototype(reflect.TypeOf(1)); err == nil {
+		err := checkServiceMethodPrototype(reflect.TypeOf(1))
+		if err == nil {
 			t.Error()
 		}
 	})
 
 	t.Run("arguments count wrong", func(t *testing.T) {
-		if err := checkServiceMethodPrototype(reflect.TypeOf(func() {})); err == nil {
+		err := checkServiceMethodPrototype(reflect.TypeOf(
+			func() {},
+		))
+		if err == nil {
 			t.Error()
 		}
 	})
 
 	t.Run("first argument type wrong", func(t *testing.T) {
-		if err := checkServiceMethodPrototype(reflect.TypeOf(func(*struct{}, *struct{}) {})); err == nil {
+		err := checkServiceMethodPrototype(reflect.TypeOf(
+			func(*struct{}, *struct{}) {},
+		))
+		if err == nil {
 			t.Error()
 		}
 	})
 
 	t.Run("second argument type wrong", func(t *testing.T) {
-		if err := checkServiceMethodPrototype(reflect.TypeOf(func(*ServiceMethodContext, struct{}) {})); err == nil {
+		err := checkServiceMethodPrototype(reflect.TypeOf(
+			func(*ServiceMethodContext, struct{}) {},
+		))
+		if err == nil {
 			t.Error()
 		}
 	})
 
 	t.Run("return values type wrong", func(t *testing.T) {
-		if err := checkServiceMethodPrototype(reflect.TypeOf(func(*ServiceMethodContext, *struct{}) (int, int, int) { return 0, 0, 0 })); err == nil {
+		err := checkServiceMethodPrototype(reflect.TypeOf(
+			func(*ServiceMethodContext, *struct{}) (int, int, int) { return 0, 0, 0 },
+		))
+		if err == nil {
 			t.Error()
 		}
 	})
 
 	t.Run("normal method", func(t *testing.T) {
-		if err := checkServiceMethodPrototype(reflect.TypeOf(e.errorMethod)); err != nil {
+		err := checkServiceMethodPrototype(reflect.TypeOf(
+			func(*ServiceMethodContext, *struct{}) error { return nil },
+		))
+		if err != nil {
 			t.Error(err)
 		}
 
-		if err := checkServiceMethodPrototype(reflect.TypeOf(e.errorMethodWithDelegatedResponseBody)); err != nil {
+		err = checkServiceMethodPrototype(reflect.TypeOf(
+			func(*ServiceMethodContext, *struct{}) (*struct{}, error) { return nil, nil },
+		))
+		if err != nil {
 			t.Error(err)
 		}
 	})
 }
 
-func TestServiceHandlerServeHTTP(t *testing.T) {
-	normalFuncHandler, _ := NewServiceHandler(normalFunc, "kftest", false)
-	nilFuncHandler, _ := NewServiceHandler(nilFunc, "kftest", false)
-	errorMethodHandler, _ := NewServiceHandler(e.errorMethod, "kftest", false)
-	panicMethodHandler, _ := NewServiceHandler(e.panicMethod, "kftest", false)
-	validatorEnabledFuncHandler, _ := NewServiceHandler(validatorEnabledFunc, "kftest", false)
+type testingRequest struct {
+	method            string
+	uri               string
+	body              string
+	header            map[string]string
+	params            httprouter.Params
+	bypassRequestBody bool
+	expectStatus      int
+}
 
-	t.Run("empty function with empty json", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/", strings.NewReader("{}"))
-		req = req.WithContext(context.WithValue(req.Context(), "kftest", dummyLogger))
-		req.Header.Add("content-type", "application/json")
-		recorder := httptest.NewRecorder()
-		normalFuncHandler.ServeHTTP(recorder, req)
-		if recorder.Code != 200 {
-			t.Error("code is not 200, body:", recorder.Body)
+func doTest(t *testing.T, tr *testingRequest, fun interface{}) {
+	if tr.expectStatus == 0 {
+		tr.expectStatus = 200
+	}
+
+	if tr.method == "" {
+		tr.method = "POST"
+	}
+
+	if tr.uri == "" {
+		tr.uri = "/"
+	}
+
+	r := httptest.NewRequest(tr.method, tr.uri, strings.NewReader(tr.body))
+	r = r.WithContext(context.WithValue(r.Context(), "aw_test", dummyLogger))
+	if tr.header != nil {
+		for k, v := range tr.header {
+			r.Header.Add(k, v)
 		}
+	}
+
+	h, err := NewServiceHandler(fun, "aw_test", tr.bypassRequestBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	h.ServeHTTPWithParams(recorder, r, tr.params)
+	if recorder.Code != tr.expectStatus {
+		t.Errorf("expected code is %d, but response code is %d. the body is below: \n%s", tr.expectStatus,
+			recorder.Code, recorder.Body)
+	}
+}
+
+func TestServeHTTP(t *testing.T) {
+	t.Run("normal request", func(t *testing.T) {
+		doTest(
+			t,
+			&testingRequest{
+				method: "POST",
+				uri:    "/",
+				body:   "{}",
+				header: map[string]string{"content-type": "application/json"},
+			},
+			func(*ServiceMethodContext, *struct{}) (*struct{ A int }, error) {
+				return &struct{ A int }{A: 1}, nil
+			},
+		)
 	})
 
-	t.Run("nil function with empty json", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/", strings.NewReader("{}"))
-		req = req.WithContext(context.WithValue(req.Context(), "kftest", dummyLogger))
-		req.Header.Add("content-type", "application/json")
-		recorder := httptest.NewRecorder()
-		nilFuncHandler.ServeHTTP(recorder, req)
-		if recorder.Code != 200 {
-			t.Error("code is not 200, body:", recorder.Body)
-		}
+	t.Run("normal request and function return nil without error", func(t *testing.T) {
+		doTest(
+			t,
+			&testingRequest{
+				body:   "{}",
+				header: map[string]string{"content-type": "application/json"},
+			},
+			func(*ServiceMethodContext, *struct{}) (*struct{ A int }, error) {
+				return nil, nil
+			},
+		)
 	})
 
-	t.Run("empty function with syntax error json", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/", strings.NewReader("{312}"))
-		req = req.WithContext(context.WithValue(req.Context(), "kftest", dummyLogger))
-		req.Header.Add("content-type", "application/json")
-		recorder := httptest.NewRecorder()
-		normalFuncHandler.ServeHTTP(recorder, req)
-		if recorder.Code != 400 {
-			t.Error("code is not 400, body:", recorder.Body)
-		}
+	t.Run("normal request with arguments in path, body and query", func(t *testing.T) {
+		doTest(
+			t,
+			&testingRequest{
+				uri:    "/?A=1&B=1&C=1",
+				body:   "{\"B\":2,\"C\":2}",
+				params: []httprouter.Param{{Key: "C", Value: "3"}},
+				header: map[string]string{"content-type": "application/json"},
+			},
+			func(_ *ServiceMethodContext, args *struct{ A, B, C int }) (*struct{ A int }, error) {
+				if args.A != 1 || args.B != 2 || args.C != 3 {
+					t.Error()
+				}
+				return nil, nil
+			},
+		)
 	})
 
-	t.Run("empty function with empty string", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/", strings.NewReader(""))
-		req = req.WithContext(context.WithValue(req.Context(), "kftest", dummyLogger))
-		req.Header.Add("content-type", "application/json")
-		recorder := httptest.NewRecorder()
-		normalFuncHandler.ServeHTTP(recorder, req)
-		if recorder.Code != 400 {
-			t.Error("code is not 400, body:", recorder.Body)
-		}
+	t.Run("normal request while bypassed request body", func(t *testing.T) {
+		doTest(
+			t,
+			&testingRequest{
+				uri:               "/?A=1&B=1&C=1",
+				body:              "{\"B\":2,\"C\":2}",
+				params:            []httprouter.Param{{Key: "C", Value: "3"}},
+				header:            map[string]string{"content-type": "application/json"},
+				bypassRequestBody: true,
+			},
+			func(_ *ServiceMethodContext, args *struct{ A, B, C int }) (*struct{ A int }, error) {
+				if args.A != 1 || args.B != 1 || args.C != 3 {
+					t.Error()
+				}
+				return nil, nil
+			},
+		)
 	})
 
-	t.Run("error method with empty json", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/", strings.NewReader("{}"))
-		req = req.WithContext(context.WithValue(req.Context(), "kftest", dummyLogger))
-		req.Header.Add("content-type", "application/json")
-		recorder := httptest.NewRecorder()
-		errorMethodHandler.ServeHTTP(recorder, req)
-		if recorder.Code != 500 {
-			t.Error("code is not 500, body:", recorder.Body)
-		}
+	t.Run("normal request while content-type hasn't specified", func(t *testing.T) {
+		doTest(
+			t,
+			&testingRequest{
+				uri:    "/?A=1&B=1&C=1",
+				body:   "{\"B\":2,\"C\":2}",
+				params: []httprouter.Param{{Key: "C", Value: "3"}},
+			},
+			func(_ *ServiceMethodContext, args *struct{ A, B, C int }) (*struct{ A int }, error) {
+				if args.A != 1 || args.B != 1 || args.C != 3 {
+					t.Error()
+				}
+				return nil, nil
+			},
+		)
 	})
 
-	t.Run("panic method with empty json", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/", strings.NewReader("{}"))
-		req = req.WithContext(context.WithValue(req.Context(), "kftest", dummyLogger))
-		req.Header.Add("content-type", "application/json")
-		recorder := httptest.NewRecorder()
-		panicMethodHandler.ServeHTTP(recorder, req)
-		if recorder.Code != 500 {
-			t.Error("code is not 500, body:", recorder.Body)
-		}
+	t.Run("json syntax error", func(t *testing.T) {
+		doTest(
+			t,
+			&testingRequest{
+				body:         "{1234}",
+				header:       map[string]string{"content-type": "application/json"},
+				expectStatus: 400,
+			},
+			func(*ServiceMethodContext, *struct{}) (*struct{ A int }, error) {
+				return nil, nil
+			},
+		)
 	})
 
-	t.Run("validator enabled function with normal json", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/", strings.NewReader("{\"A\": 1, \"B\":2}"))
-		req = req.WithContext(context.WithValue(req.Context(), "kftest", dummyLogger))
-		req.Header.Add("content-type", "application/json")
-		recorder := httptest.NewRecorder()
-		validatorEnabledFuncHandler.ServeHTTPWithParams(recorder, req, httprouter.Params{httprouter.Param{Key: "A", Value: "2"}})
-		if recorder.Code != 200 {
-			t.Error("code is not 200, body:", recorder.Body)
-		}
+	t.Run("empty request body and hasn't bypassed body", func(t *testing.T) {
+		doTest(
+			t,
+			&testingRequest{
+				header:       map[string]string{"content-type": "application/json"},
+				expectStatus: 400,
+			},
+			func(*ServiceMethodContext, *struct{}) (*struct{ A int }, error) {
+				return nil, nil
+			},
+		)
 	})
 
-	t.Run("validator enabled function with normal query string", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/?a=1&b=2", strings.NewReader("{}"))
-		req = req.WithContext(context.WithValue(req.Context(), "kftest", dummyLogger))
-		req.Header.Add("content-type", "application/json")
-		recorder := httptest.NewRecorder()
-		validatorEnabledFuncHandler.ServeHTTP(recorder, req)
-		if recorder.Code != 200 {
-			t.Error("code is not 200, body:", recorder.Body)
-		}
+	t.Run("function return error", func(t *testing.T) {
+		doTest(
+			t,
+			&testingRequest{
+				body:         "{}",
+				header:       map[string]string{"content-type": "application/json"},
+				expectStatus: 500,
+			},
+			func(*ServiceMethodContext, *struct{}) (*struct{ A int }, error) {
+				return nil, errors.New("expected error")
+			},
+		)
 	})
 
-	t.Run("validator enabled function with invalid json", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/", strings.NewReader("{}"))
-		req = req.WithContext(context.WithValue(req.Context(), "kftest", dummyLogger))
-		req.Header.Add("content-type", "application/json")
-		recorder := httptest.NewRecorder()
-		validatorEnabledFuncHandler.ServeHTTP(recorder, req)
-		if recorder.Code != 400 {
-			t.Error("code is not 400, body:", recorder.Body, ", code:", recorder.Code)
-		}
-	})
-
-	t.Run("validator enabled function with invalid query string", func(t *testing.T) {
-		req := httptest.NewRequest("POST", "/?b=1", strings.NewReader("{}"))
-		req = req.WithContext(context.WithValue(req.Context(), "kftest", dummyLogger))
-		recorder := httptest.NewRecorder()
-		validatorEnabledFuncHandler.ServeHTTP(recorder, req)
-		if recorder.Code != 400 {
-			t.Error("code is not 400, body:", recorder.Body, ", code:", recorder.Code)
-		}
+	t.Run("function panicked", func(t *testing.T) {
+		doTest(
+			t,
+			&testingRequest{
+				body:         "{}",
+				header:       map[string]string{"content-type": "application/json"},
+				expectStatus: 500,
+			},
+			func(*ServiceMethodContext, *struct{}) (*struct{ A int }, error) {
+				panic("expected panic")
+				return nil, nil
+			},
+		)
 	})
 }
